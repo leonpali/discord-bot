@@ -36,6 +36,10 @@ public final class Deck {
         return card;
     }
 
+    public void burn() {
+        deal();
+    }
+
     public int remaining() {
         return cards.size();
     }

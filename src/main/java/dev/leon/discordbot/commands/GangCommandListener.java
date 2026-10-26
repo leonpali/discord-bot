@@ -130,7 +130,7 @@ public class GangCommandListener extends ListenerAdapter {
 
     private void take(MessageReceivedEvent event, String[] parts) {
         GameSession session = games.get(event.getChannel().getIdLong());
-        if (session == null || !session.isStarted()) {
+        if (session == null || !session.isStarted() || session.isFinished()) {
             reply(event, "No round is running in this channel.");
             return;
         }
@@ -180,14 +180,26 @@ public class GangCommandListener extends ListenerAdapter {
     }
 
     private void advanceIfComplete(MessageChannel channel, GameSession session) {
+        boolean finished;
         synchronized (session) {
             if (!session.isRoundComplete()) {
                 return;
             }
             channel.editMessageById(session.overviewMessageId(), renderOverview(session, true)).queue();
-            session.nextRound();
+            finished = session.isFinalRound();
+            if (finished) {
+                session.finish();
+            } else {
+                session.nextRound();
+            }
         }
-        postOverview(channel, session);
+        if (finished) {
+            channel.sendMessage("All %d rounds are locked in. The host can `!gang-end` to close the game.\n\n%s"
+                            .formatted(GameSession.FINAL_ROUND, renderHistory(session)))
+                    .queue();
+        } else {
+            postOverview(channel, session);
+        }
     }
 
     private void postOverview(MessageChannel channel, GameSession session) {
@@ -220,11 +232,19 @@ public class GangCommandListener extends ListenerAdapter {
         synchronized (session) {
             List<Player> players = session.players();
             StringBuilder sb = new StringBuilder();
+            String title = "Round %d · %s".formatted(session.round(), stageName(session.round()));
             if (lockedIn) {
-                sb.append("**Round %d: locked in**\n".formatted(session.round()));
+                sb.append("**%s: locked in**\n".formatted(title));
             } else {
-                sb.append("**Round %d**: claim a number with `!take <number>`, then react %s when everyone has one.\n"
-                        .formatted(session.round(), READY_EMOJI));
+                sb.append("**%s**: claim a number with `!take <number>`, then react %s when everyone has one.\n"
+                        .formatted(title, READY_EMOJI));
+            }
+
+            List<Card> board = session.board();
+            if (!board.isEmpty()) {
+                sb.append("Board: **")
+                        .append(board.stream().map(Card::toString).collect(Collectors.joining("  ")))
+                        .append("**\n");
             }
 
             for (int number = 1; number <= players.size(); number++) {
@@ -252,9 +272,40 @@ public class GangCommandListener extends ListenerAdapter {
                 if (session.lastAction() != null) {
                     sb.append("-# ").append(session.lastAction()).append('\n');
                 }
+                if (!session.history().isEmpty()) {
+                    sb.append("\n**Earlier rounds**\n").append(renderHistory(session));
+                }
             }
             return sb.toString();
         }
+    }
+
+    private static String renderHistory(GameSession session) {
+        StringBuilder sb = new StringBuilder();
+        List<List<Player>> history = session.history();
+        for (int i = 0; i < history.size(); i++) {
+            List<Player> byNumber = history.get(i);
+            sb.append(stageName(i + 1)).append(": ");
+            for (int n = 0; n < byNumber.size(); n++) {
+                Player holder = byNumber.get(n);
+                if (n > 0) {
+                    sb.append(" · ");
+                }
+                sb.append("`%d` %s".formatted(n + 1, holder == null ? "-" : holder.name()));
+            }
+            sb.append('\n');
+        }
+        return sb.toString();
+    }
+
+    private static String stageName(int round) {
+        return switch (round) {
+            case 1 -> "Pre-flop";
+            case 2 -> "Flop";
+            case 3 -> "Turn";
+            case 4 -> "River";
+            default -> "";
+        };
     }
 
     private void sendHand(MessageReceivedEvent event, MessageChannel channel, Player player, List<Card> cards) {
