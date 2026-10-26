@@ -21,7 +21,9 @@ public final class Bot {
             System.exit(1);
         }
 
-        JDA jda = JDABuilder.createLight(token, GatewayIntent.GUILD_MESSAGES, GatewayIntent.MESSAGE_CONTENT)
+        JDA jda = JDABuilder.createLight(token, GatewayIntent.GUILD_MESSAGES,
+                        GatewayIntent.MESSAGE_CONTENT,
+                        GatewayIntent.GUILD_MESSAGE_REACTIONS)
                 .addEventListeners(new SlashCommandListener(), new GangCommandListener())
                 .build();
 
