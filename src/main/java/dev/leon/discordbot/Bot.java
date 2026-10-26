@@ -1,5 +1,6 @@
 package dev.leon.discordbot;
 
+import dev.leon.discordbot.commands.GangCommandListener;
 import dev.leon.discordbot.commands.SlashCommandListener;
 import net.dv8tion.jda.api.JDA;
 import net.dv8tion.jda.api.JDABuilder;
@@ -20,8 +21,8 @@ public final class Bot {
             System.exit(1);
         }
 
-        JDA jda = JDABuilder.createLight(token, GatewayIntent.GUILD_MESSAGES)
-                .addEventListeners(new SlashCommandListener())
+        JDA jda = JDABuilder.createLight(token, GatewayIntent.GUILD_MESSAGES, GatewayIntent.MESSAGE_CONTENT)
+                .addEventListeners(new SlashCommandListener(), new GangCommandListener())
                 .build();
 
         jda.updateCommands()
