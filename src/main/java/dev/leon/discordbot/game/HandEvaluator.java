@@ -43,8 +43,8 @@ public final class HandEvaluator {
         List<Rank> groups = new ArrayList<>(counts.keySet());
         groups.sort(Comparator.<Rank>comparingInt(counts::get).reversed().thenComparing(Comparator.reverseOrder()));
 
-        List<Card> sorted = new ArrayList<>(five);
-        sorted.sort(Comparator.<Card>comparingInt(card -> counts.get(card.rank())).reversed()
+        List<Card> displayOrder = new ArrayList<>(five);
+        displayOrder.sort(Comparator.<Card>comparingInt(card -> counts.get(card.rank())).reversed()
                 .thenComparing(Card::rank, Comparator.reverseOrder()));
 
         boolean flush = five.stream().map(Card::suit).distinct().count() == 1;
@@ -52,37 +52,37 @@ public final class HandEvaluator {
 
         if (straightHigh != null) {
             if (straightHigh == Rank.FIVE) {
-                sorted.add(sorted.removeFirst());
+                displayOrder.add(displayOrder.removeFirst());
             }
-            HandCategory category;
-            if (!flush) {
-                category = HandCategory.STRAIGHT;
-            } else if (straightHigh == Rank.ACE) {
-                category = HandCategory.ROYAL_FLUSH;
-            } else {
-                category = HandCategory.STRAIGHT_FLUSH;
-            }
-            return new HandValue(category, List.of(straightHigh), List.copyOf(sorted));
+            return new HandValue(straightCategory(straightHigh, flush), List.of(straightHigh), displayOrder);
         }
+        return new HandValue(groupedCategory(counts.get(groups.getFirst()), groups.size(), flush), groups, displayOrder);
+    }
 
-        int top = counts.get(groups.getFirst());
-        HandCategory category;
-        if (top == 4) {
-            category = HandCategory.FOUR_OF_A_KIND;
-        } else if (top == 3 && groups.size() == 2) {
-            category = HandCategory.FULL_HOUSE;
-        } else if (flush) {
-            category = HandCategory.FLUSH;
-        } else if (top == 3) {
-            category = HandCategory.THREE_OF_A_KIND;
-        } else if (top == 2 && groups.size() == 3) {
-            category = HandCategory.TWO_PAIR;
-        } else if (top == 2) {
-            category = HandCategory.PAIR;
-        } else {
-            category = HandCategory.HIGH_CARD;
+    private static HandCategory straightCategory(Rank high, boolean flush) {
+        if (!flush) {
+            return HandCategory.STRAIGHT;
         }
-        return new HandValue(category, List.copyOf(groups), List.copyOf(sorted));
+        return high == Rank.ACE ? HandCategory.ROYAL_FLUSH : HandCategory.STRAIGHT_FLUSH;
+    }
+
+    private static HandCategory groupedCategory(int largestGroup, int distinctRanks, boolean flush) {
+        if (largestGroup == 4) {
+            return HandCategory.FOUR_OF_A_KIND;
+        }
+        if (largestGroup == 3 && distinctRanks == 2) {
+            return HandCategory.FULL_HOUSE;
+        }
+        if (flush) {
+            return HandCategory.FLUSH;
+        }
+        if (largestGroup == 3) {
+            return HandCategory.THREE_OF_A_KIND;
+        }
+        if (largestGroup == 2) {
+            return distinctRanks == 3 ? HandCategory.TWO_PAIR : HandCategory.PAIR;
+        }
+        return HandCategory.HIGH_CARD;
     }
 
     private static Rank straightHigh(List<Rank> distinctDescending) {

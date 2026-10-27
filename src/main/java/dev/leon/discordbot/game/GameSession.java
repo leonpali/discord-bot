@@ -1,29 +1,39 @@
 package dev.leon.discordbot.game;
 
 import java.util.ArrayList;
-import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 public final class GameSession {
     public static final int MAX_PLAYERS = 9;
     public static final int MIN_PLAYERS = 1;
     public static final int HOLE_CARDS = 2;
-    public static final int FINAL_ROUND = 4;
+
+    public enum JoinResult { JOINED, ALREADY_JOINED, FULL, ALREADY_STARTED }
+
+    public sealed interface TakeResult {
+        record Taken(Integer previousNumber, Player previousHolder) implements TakeResult {}
+        record AlreadyYours() implements TakeResult {}
+        record OutOfRange() implements TakeResult {}
+    }
+
+    public record Advance(RoundRecord completed, long completedOverviewId, boolean finished) {}
 
     private final Player host;
     private final Map<Long, Player> players = new LinkedHashMap<>();
-    private final Map<Long, List<Card>> hands = new LinkedHashMap<>();
-    private Deck deck;
+    private final Map<Long, List<Card>> hands = new HashMap<>();
     private final List<Card> board = new ArrayList<>();
+    private final List<RoundRecord> history = new ArrayList<>();
+    private Deck deck;
 
-    private int round;
-    private final Map<Long, Integer> numbers = new LinkedHashMap<>();
+    private Round round;
+    private final Map<Long, Integer> numbers = new HashMap<>();
     private final Set<Long> ready = new HashSet<>();
-    private final List<List<Player>> history = new ArrayList<>();
     private long overviewMessageId;
     private String lastAction;
     private boolean finished;
@@ -37,141 +47,110 @@ public final class GameSession {
         return host;
     }
 
-    public synchronized List<Player> players() {
-        return List.copyOf(players.values());
+    public boolean isHost(long userId) {
+        return host.userId() == userId;
+    }
+
+    public synchronized int playerCount() {
+        return players.size();
     }
 
     public synchronized boolean hasPlayer(long userId) {
         return players.containsKey(userId);
     }
 
-    public synchronized boolean isFull() {
-        return players.size() >= MAX_PLAYERS;
-    }
-
     public synchronized boolean isStarted() {
-        return round > 0;
+        return round != null;
     }
 
-    public synchronized boolean join(Player player) {
-        if (isFull() || players.containsKey(player.userId())) {
-            return false;
+    public synchronized JoinResult join(Player player) {
+        if (isStarted()) {
+            return JoinResult.ALREADY_STARTED;
+        }
+        if (players.containsKey(player.userId())) {
+            return JoinResult.ALREADY_JOINED;
+        }
+        if (players.size() >= MAX_PLAYERS) {
+            return JoinResult.FULL;
         }
         players.put(player.userId(), player);
-        return true;
+        return JoinResult.JOINED;
     }
 
     public synchronized Map<Player, List<Card>> dealHands() {
         deck = Deck.shuffled();
-        hands.clear();
         board.clear();
         history.clear();
         finished = false;
+
+        Map<Long, List<Card>> dealing = new HashMap<>();
         for (int i = 0; i < HOLE_CARDS; i++) {
-            for (Player player : players.values()) {
-                hands.computeIfAbsent(player.userId(), id -> new ArrayList<>(HOLE_CARDS)).add(deck.deal());
+            for (long userId : players.keySet()) {
+                dealing.computeIfAbsent(userId, id -> new ArrayList<>(HOLE_CARDS)).add(deck.deal());
             }
         }
 
-        round = 0;
-        nextRound();
-
         Map<Player, List<Card>> dealt = new LinkedHashMap<>();
         for (Player player : players.values()) {
-            dealt.put(player, List.copyOf(hands.get(player.userId())));
+            List<Card> hand = List.copyOf(dealing.get(player.userId()));
+            hands.put(player.userId(), hand);
+            dealt.put(player, hand);
         }
+
+        startRound(Round.PRE_FLOP);
         return dealt;
     }
 
-    public synchronized int cardsRemaining() {
-        return deck == null ? 52 : deck.remaining();
-    }
-
-    public synchronized int round() {
-        return round;
-    }
-
-    public synchronized void nextRound() {
-        if (round >= FINAL_ROUND) {
-            throw new IllegalStateException("Round %d is the last round".formatted(FINAL_ROUND));
-        }
-        if (round > 0) {
-            history.add(assignments());
-        }
-        round++;
+    private void startRound(Round next) {
+        round = next;
         numbers.clear();
         ready.clear();
         overviewMessageId = 0;
         lastAction = null;
 
-        int reveal = switch (round) {
-            case 2 -> 3;
-            case 3, 4 -> 1;
-            default -> 0;
-        };
-        if (reveal > 0) {
+        if (next.cardsRevealed() > 0) {
             deck.burn();
-            for (int i = 0; i < reveal; i++) {
+            for (int i = 0; i < next.cardsRevealed(); i++) {
                 board.add(deck.deal());
             }
         }
     }
 
-    public synchronized boolean isFinalRound() {
-        return round == FINAL_ROUND;
-    }
-
-    public synchronized void finish() {
-        history.add(assignments());
-        finished = true;
-        overviewMessageId = 0;
-    }
-
-    public synchronized boolean isFinished() {
-        return finished;
-    }
-
-    public synchronized Showdown showdown() {
-        if (!finished) {
-            throw new IllegalStateException("The game isn't finished yet");
+    public synchronized Optional<Advance> advanceIfComplete() {
+        boolean complete = !finished
+                && numbers.size() == players.size()
+                && ready.containsAll(players.keySet());
+        if (!complete) {
+            return Optional.empty();
         }
-        List<Showdown.Entry> entries = new ArrayList<>();
-        for (int number = 1; number <= players.size(); number++) {
-            Player player = holderOf(number);
-            List<Card> hand = hands.get(player.userId());
-            List<Card> cards = new ArrayList<>(hand);
-            cards.addAll(board);
-            entries.add(new Showdown.Entry(number, player, List.copyOf(hand), HandEvaluator.best(cards)));
+
+        RoundRecord completed = new RoundRecord(round, board, assignments());
+        history.add(completed);
+        long completedOverviewId = overviewMessageId;
+        if (round.isLast()) {
+            finished = true;
+            overviewMessageId = 0;
+        } else {
+            startRound(round.next());
         }
-        return Showdown.of(entries);
+        return Optional.of(new Advance(completed, completedOverviewId, finished));
     }
 
-    public synchronized List<List<Player>> history() {
-        return List.copyOf(history);
-    }
-
-    private List<Player> assignments() {
-        List<Player> byNumber = new ArrayList<>();
-        for (int number = 1; number <= players.size(); number++) {
-            byNumber.add(holderOf(number));
+    public synchronized boolean attachOverview(Round forRound, long messageId) {
+        if (finished || round != forRound) {
+            return false;
         }
-        return Collections.unmodifiableList(byNumber);
+        overviewMessageId = messageId;
+        return true;
     }
 
-    public synchronized List<Card> board() {
-        return List.copyOf(board);
-    }
-
-    public sealed interface TakeResult {
-        record Taken(Integer previousNumber, Player previousHolder) implements TakeResult {}
-        record AlreadyYours() implements TakeResult {}
-        record OutOfRange(int max) implements TakeResult {}
+    public synchronized boolean isOverview(long messageId) {
+        return overviewMessageId != 0 && overviewMessageId == messageId;
     }
 
     public synchronized TakeResult take(long userId, int number) {
-        int max = players.size();
-        if (number < 1 || number > max) {
-            return new TakeResult.OutOfRange(max);
+        if (number < 1 || number > players.size()) {
+            return new TakeResult.OutOfRange();
         }
         Integer previousNumber = numbers.get(userId);
         if (previousNumber != null && previousNumber == number) {
@@ -184,10 +163,10 @@ public final class GameSession {
         }
         numbers.put(userId, number);
 
-        Player taker = players.get(userId);
+        String taker = players.get(userId).name();
         lastAction = previousHolder == null
-                ? "%s took %d".formatted(taker.name(), number)
-                : "%s took %d from %s".formatted(taker.name(), number, previousHolder.name());
+                ? "%s took %d".formatted(taker, number)
+                : "%s took %d from %s".formatted(taker, number, previousHolder.name());
         return new TakeResult.Taken(previousNumber, previousHolder);
     }
 
@@ -201,23 +180,6 @@ public final class GameSession {
         return true;
     }
 
-    public synchronized Player holderOf(int number) {
-        for (Map.Entry<Long, Integer> entry : numbers.entrySet()) {
-            if (entry.getValue() == number) {
-                return players.get(entry.getKey());
-            }
-        }
-        return null;
-    }
-
-    public synchronized boolean hasNumber(long userId) {
-        return numbers.containsKey(userId);
-    }
-
-    public synchronized boolean allNumbersAssigned() {
-        return numbers.size() == players.size();
-    }
-
     public synchronized void setReady(long userId, boolean isReady) {
         if (isReady) {
             ready.add(userId);
@@ -226,23 +188,47 @@ public final class GameSession {
         }
     }
 
-    public synchronized boolean isReady(long userId) {
-        return ready.contains(userId);
+    public synchronized RoundView view() {
+        List<Player> unassigned = players.values().stream()
+                .filter(player -> !numbers.containsKey(player.userId()))
+                .toList();
+        return new RoundView(round, board, assignments(), unassigned, ready, lastAction, history, overviewMessageId);
     }
 
-    public synchronized boolean isRoundComplete() {
-        return allNumbersAssigned() && ready.containsAll(players.keySet());
+    public synchronized List<RoundRecord> history() {
+        return List.copyOf(history);
     }
 
-    public synchronized long overviewMessageId() {
-        return overviewMessageId;
+    public synchronized Showdown showdown() {
+        if (!finished) {
+            throw new IllegalStateException("The game isn't finished yet");
+        }
+        List<Player> byNumber = assignments();
+        List<Showdown.Entry> entries = new ArrayList<>();
+        for (int i = 0; i < byNumber.size(); i++) {
+            Player player = byNumber.get(i);
+            List<Card> hand = hands.get(player.userId());
+            List<Card> cards = new ArrayList<>(hand);
+            cards.addAll(board);
+            entries.add(new Showdown.Entry(i + 1, player, hand, HandEvaluator.best(cards)));
+        }
+        return new Showdown(board, entries);
     }
 
-    public synchronized void setOverviewMessageId(long overviewMessageId) {
-        this.overviewMessageId = overviewMessageId;
+    private List<Player> assignments() {
+        List<Player> byNumber = new ArrayList<>();
+        for (int number = 1; number <= players.size(); number++) {
+            byNumber.add(holderOf(number));
+        }
+        return byNumber;
     }
 
-    public synchronized String lastAction() {
-        return lastAction;
+    private Player holderOf(int number) {
+        for (Map.Entry<Long, Integer> entry : numbers.entrySet()) {
+            if (entry.getValue() == number) {
+                return players.get(entry.getKey());
+            }
+        }
+        return null;
     }
 }

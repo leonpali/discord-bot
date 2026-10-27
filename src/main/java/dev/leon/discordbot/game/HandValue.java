@@ -4,6 +4,11 @@ import java.util.List;
 
 public record HandValue(HandCategory category, List<Rank> tiebreak, List<Card> cards) implements Comparable<HandValue> {
 
+    public HandValue {
+        tiebreak = List.copyOf(tiebreak);
+        cards = List.copyOf(cards);
+    }
+
     @Override
     public int compareTo(HandValue other) {
         int byCategory = category.compareTo(other.category);
