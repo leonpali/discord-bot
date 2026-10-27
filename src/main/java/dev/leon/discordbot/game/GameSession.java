@@ -131,6 +131,21 @@ public final class GameSession {
         return finished;
     }
 
+    public synchronized Showdown showdown() {
+        if (!finished) {
+            throw new IllegalStateException("The game isn't finished yet");
+        }
+        List<Showdown.Entry> entries = new ArrayList<>();
+        for (int number = 1; number <= players.size(); number++) {
+            Player player = holderOf(number);
+            List<Card> hand = hands.get(player.userId());
+            List<Card> cards = new ArrayList<>(hand);
+            cards.addAll(board);
+            entries.add(new Showdown.Entry(number, player, List.copyOf(hand), HandEvaluator.best(cards)));
+        }
+        return Showdown.of(entries);
+    }
+
     public synchronized List<List<Player>> history() {
         return List.copyOf(history);
     }

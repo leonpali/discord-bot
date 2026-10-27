@@ -5,6 +5,9 @@ import dev.leon.discordbot.game.GameManager;
 import dev.leon.discordbot.game.GameSession;
 import dev.leon.discordbot.game.GameSession.TakeResult;
 import dev.leon.discordbot.game.Player;
+import dev.leon.discordbot.game.Showdown;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -194,9 +197,7 @@ public class GangCommandListener extends ListenerAdapter {
             }
         }
         if (finished) {
-            channel.sendMessage("All %d rounds are locked in. The host can `!gang-end` to close the game.\n\n%s"
-                            .formatted(GameSession.FINAL_ROUND, renderHistory(session)))
-                    .queue();
+            channel.sendMessage(renderShowdown(session)).queue();
         } else {
             postOverview(channel, session);
         }
@@ -278,6 +279,42 @@ public class GangCommandListener extends ListenerAdapter {
             }
             return sb.toString();
         }
+    }
+
+    private static String renderShowdown(GameSession session) {
+        Showdown showdown = session.showdown();
+        StringBuilder sb = new StringBuilder("**Showdown**\n");
+        sb.append("Board: **").append(joinCards(session.board())).append("**\n\n");
+
+        for (Showdown.Entry entry : showdown.entries()) {
+            sb.append("`%d` **%s**: %s → **%s** (%s)\n".formatted(
+                    entry.number(),
+                    entry.player().name(),
+                    joinCards(entry.hand()),
+                    entry.value().describe(),
+                    joinCards(entry.value().cards())));
+        }
+
+        if (showdown.win()) {
+            sb.append("\n## 🎉 Win! Your numbers match the hand ranking.\n");
+        } else {
+            List<Showdown.Entry> ranked = new ArrayList<>(showdown.entries());
+            ranked.sort(Comparator.comparing(Showdown.Entry::value));
+            StringBuilder order = new StringBuilder(ranked.getFirst().player().name());
+            for (int i = 1; i < ranked.size(); i++) {
+                boolean tie = ranked.get(i - 1).value().compareTo(ranked.get(i).value()) == 0;
+                order.append(tie ? " = " : " < ").append(ranked.get(i).player().name());
+            }
+            sb.append("\n## ❌ Loss.\nCorrect order, weakest to strongest: ").append(order).append('\n');
+        }
+
+        sb.append("\n**Rounds**\n").append(renderHistory(session));
+        sb.append("-# The host can `!gang-end` to close the game.");
+        return sb.toString();
+    }
+
+    private static String joinCards(List<Card> cards) {
+        return cards.stream().map(Card::toString).collect(Collectors.joining("  "));
     }
 
     private static String renderHistory(GameSession session) {
