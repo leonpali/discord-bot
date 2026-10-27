@@ -12,6 +12,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 import net.dv8tion.jda.api.Permission;
+import net.dv8tion.jda.api.entities.channel.middleman.GuildMessageChannel;
 import net.dv8tion.jda.api.entities.channel.middleman.MessageChannel;
 import net.dv8tion.jda.api.entities.emoji.Emoji;
 import net.dv8tion.jda.api.entities.emoji.EmojiUnion;
@@ -23,6 +24,7 @@ import net.dv8tion.jda.api.hooks.ListenerAdapter;
 
 public class GangCommandListener extends ListenerAdapter {
     private static final String READY_EMOJI = "✅";
+    private static final String KEYCAP = "\uFE0F\u20E3";
 
     private final GameManager games = new GameManager();
 
@@ -32,25 +34,24 @@ public class GangCommandListener extends ListenerAdapter {
             return;
         }
 
-        String[] parts = event.getMessage().getContentRaw().strip().toLowerCase().split("\\s+");
-        switch (parts[0]) {
+        String command = event.getMessage().getContentRaw().strip().toLowerCase();
+        switch (command) {
             case "!gang-create" -> create(event);
             case "!gang-join" -> join(event);
             case "!gang-start" -> start(event);
             case "!gang-end" -> end(event);
-            case "!take" -> take(event, parts);
             default -> {}
         }
     }
 
     @Override
     public void onMessageReactionAdd(MessageReactionAddEvent event) {
-        onReadyReaction(event, true);
+        onOverviewReaction(event, true);
     }
 
     @Override
     public void onMessageReactionRemove(MessageReactionRemoveEvent event) {
-        onReadyReaction(event, false);
+        onOverviewReaction(event, false);
     }
 
     private void create(MessageReceivedEvent event) {
@@ -111,7 +112,7 @@ public class GangCommandListener extends ListenerAdapter {
         String names = hands.keySet().stream().map(Player::name).collect(Collectors.joining(", "));
         reply(event, "Dealing cards to %s. Check your DMs!".formatted(names));
 
-        MessageChannel channel = event.getChannel();
+        GuildMessageChannel channel = event.getGuildChannel();
         hands.forEach((player, cards) -> sendHand(event, channel, player, cards));
         postOverview(channel, session);
     }
@@ -131,39 +132,8 @@ public class GangCommandListener extends ListenerAdapter {
         reply(event, "Game ended.");
     }
 
-    private void take(MessageReceivedEvent event, String[] parts) {
-        GameSession session = games.get(event.getChannel().getIdLong());
-        if (session == null || !session.isStarted() || session.isFinished()) {
-            reply(event, "No round is running in this channel.");
-            return;
-        }
-        long userId = event.getAuthor().getIdLong();
-        if (!session.hasPlayer(userId)) {
-            reply(event, "You're not in this game.");
-            return;
-        }
-
-        int number;
-        try {
-            number = Integer.parseInt(parts.length > 1 ? parts[1] : "");
-        } catch (NumberFormatException e) {
-            reply(event, "Usage: `!take <number>`");
-            return;
-        }
-
-        switch (session.take(userId, number)) {
-            case TakeResult.OutOfRange(int max) -> reply(event, "Pick a number from 1 to %d.".formatted(max));
-            case TakeResult.AlreadyYours() -> reply(event, "You already have %d.".formatted(number));
-            case TakeResult.Taken() -> {
-                deleteIfPermitted(event);
-                refreshOverview(event.getChannel(), session);
-                advanceIfComplete(event.getChannel(), session);
-            }
-        }
-    }
-
-    private void onReadyReaction(GenericMessageReactionEvent event, boolean isReady) {
-        if (!event.isFromGuild() || !isReadyEmoji(event.getEmoji())) {
+    private void onOverviewReaction(GenericMessageReactionEvent event, boolean added) {
+        if (!event.isFromGuild()) {
             return;
         }
         long userId = event.getUserIdLong();
@@ -177,18 +147,53 @@ public class GangCommandListener extends ListenerAdapter {
             return;
         }
 
-        session.setReady(userId, isReady);
-        refreshOverview(event.getChannel(), session);
-        advanceIfComplete(event.getChannel(), session);
+        EmojiUnion emoji = event.getEmoji();
+        if (isReadyEmoji(emoji)) {
+            session.setReady(userId, added);
+        } else {
+            int number = numberOf(emoji);
+            if (number == 0) {
+                return;
+            }
+            boolean changed = added ? take(event, session, userId, number) : session.release(userId, number);
+            if (!changed) {
+                return;
+            }
+        }
+        refreshOverview(event.getGuildChannel(), session);
+        advanceIfComplete(event.getGuildChannel(), session);
     }
 
-    private void advanceIfComplete(MessageChannel channel, GameSession session) {
+    private boolean take(GenericMessageReactionEvent event, GameSession session, long userId, int number) {
+        return switch (session.take(userId, number)) {
+            case TakeResult.OutOfRange(int _) -> {
+                removeReaction(event, number, userId);
+                yield false;
+            }
+            case TakeResult.AlreadyYours() -> false;
+            case TakeResult.Taken(Integer previousNumber, Player previousHolder) -> {
+                if (previousNumber != null) {
+                    removeReaction(event, previousNumber, userId);
+                }
+                if (previousHolder != null) {
+                    removeReaction(event, number, previousHolder.userId());
+                }
+                yield true;
+            }
+        };
+    }
+
+    private void advanceIfComplete(GuildMessageChannel channel, GameSession session) {
         boolean finished;
         synchronized (session) {
             if (!session.isRoundComplete()) {
                 return;
             }
-            channel.editMessageById(session.overviewMessageId(), renderOverview(session, true)).queue();
+            long overviewId = session.overviewMessageId();
+            channel.editMessageById(overviewId, renderOverview(session, true)).queue();
+            if (canManageMessages(channel)) {
+                channel.clearReactionsById(overviewId).queue();
+            }
             finished = session.isFinalRound();
             if (finished) {
                 session.finish();
@@ -203,24 +208,24 @@ public class GangCommandListener extends ListenerAdapter {
         }
     }
 
-    private void postOverview(MessageChannel channel, GameSession session) {
+    private void postOverview(GuildMessageChannel channel, GameSession session) {
         int round = session.round();
+        int playerCount = session.players().size();
         channel.sendMessage(renderOverview(session, false)).queue(message -> {
-            message.addReaction(Emoji.fromUnicode(READY_EMOJI)).queue();
             synchronized (session) {
                 if (session.round() != round) {
                     return;
                 }
                 session.setOverviewMessageId(message.getIdLong());
-                String current = renderOverview(session, false);
-                if (!current.equals(message.getContentRaw())) {
-                    message.editMessage(current).queue();
-                }
             }
+            for (int number = 1; number <= playerCount; number++) {
+                message.addReaction(numberEmoji(number)).queue();
+            }
+            message.addReaction(Emoji.fromUnicode(READY_EMOJI)).queue();
         });
     }
 
-    private void refreshOverview(MessageChannel channel, GameSession session) {
+    private void refreshOverview(GuildMessageChannel channel, GameSession session) {
         synchronized (session) {
             long messageId = session.overviewMessageId();
             if (messageId != 0) {
@@ -237,7 +242,7 @@ public class GangCommandListener extends ListenerAdapter {
             if (lockedIn) {
                 sb.append("**%s: locked in**\n".formatted(title));
             } else {
-                sb.append("**%s**: claim a number with `!take <number>`, then react %s when everyone has one.\n"
+                sb.append("**%s**: react with a number to claim it, then react %s when everyone has one.\n"
                         .formatted(title, READY_EMOJI));
             }
 
@@ -250,7 +255,7 @@ public class GangCommandListener extends ListenerAdapter {
 
             for (int number = 1; number <= players.size(); number++) {
                 Player holder = session.holderOf(number);
-                sb.append("`%d` ".formatted(number));
+                sb.append(numberEmoji(number).getName()).append(' ');
                 if (holder == null) {
                     sb.append("-");
                 } else {
@@ -358,10 +363,33 @@ public class GangCommandListener extends ListenerAdapter {
                                 .queue());
     }
 
-    private static void deleteIfPermitted(MessageReceivedEvent event) {
-        if (event.getGuild().getSelfMember().hasPermission(event.getGuildChannel(), Permission.MESSAGE_MANAGE)) {
-            event.getMessage().delete().queue();
+    private static void removeReaction(GenericMessageReactionEvent event, int number, long userId) {
+        GuildMessageChannel channel = event.getGuildChannel();
+        if (canManageMessages(channel)) {
+            long messageId = event.getMessageIdLong();
+            event.getJDA().retrieveUserById(userId)
+                    .flatMap(user -> channel.removeReactionById(messageId, numberEmoji(number), user))
+                    .queue();
         }
+    }
+
+    private static boolean canManageMessages(GuildMessageChannel channel) {
+        return channel.getGuild().getSelfMember().hasPermission(channel, Permission.MESSAGE_MANAGE);
+    }
+
+    private static Emoji numberEmoji(int number) {
+        return Emoji.fromUnicode(number + KEYCAP);
+    }
+
+    private static int numberOf(EmojiUnion emoji) {
+        if (emoji.getType() != Emoji.Type.UNICODE) {
+            return 0;
+        }
+        String name = emoji.getName().replace("\uFE0F", "");
+        if (name.length() == 2 && name.charAt(1) == '\u20E3' && name.charAt(0) >= '1' && name.charAt(0) <= '9') {
+            return name.charAt(0) - '0';
+        }
+        return 0;
     }
 
     private static boolean isReadyEmoji(EmojiUnion emoji) {

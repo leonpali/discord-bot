@@ -163,7 +163,7 @@ public final class GameSession {
     }
 
     public sealed interface TakeResult {
-        record Taken() implements TakeResult {}
+        record Taken(Integer previousNumber, Player previousHolder) implements TakeResult {}
         record AlreadyYours() implements TakeResult {}
         record OutOfRange(int max) implements TakeResult {}
     }
@@ -188,7 +188,17 @@ public final class GameSession {
         lastAction = previousHolder == null
                 ? "%s took %d".formatted(taker.name(), number)
                 : "%s took %d from %s".formatted(taker.name(), number, previousHolder.name());
-        return new TakeResult.Taken();
+        return new TakeResult.Taken(previousNumber, previousHolder);
+    }
+
+    public synchronized boolean release(long userId, int number) {
+        Integer held = numbers.get(userId);
+        if (held == null || held != number) {
+            return false;
+        }
+        numbers.remove(userId);
+        lastAction = "%s gave up %d".formatted(players.get(userId).name(), number);
+        return true;
     }
 
     public synchronized Player holderOf(int number) {
