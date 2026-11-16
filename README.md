@@ -117,6 +117,14 @@ java -jar target/discord-bot-0.1.0-SNAPSHOT.jar
 When the bot is connected, it logs `Logged in as <bot name>`. The slash
 commands are registered on startup.
 
+**Run the tests** (no Discord token needed):
+
+```sh
+./mvnw test
+```
+
+`./mvnw package` also runs the tests and stops if any fail.
+
 ## Technical overview
 
 ### Stack
@@ -127,6 +135,7 @@ commands are registered on startup.
 | Logback | Logging to stdout (`src/main/resources/logback.xml`) |
 | maven-shade-plugin | Builds the runnable fat jar |
 | exec-maven-plugin | `./mvnw exec:java` |
+| JUnit 6 + maven-surefire-plugin | Unit tests (`./mvnw test`) |
 
 ### Project layout
 
@@ -135,22 +144,30 @@ src/main/java/dev/leon/discordbot/
 ├── Bot.java                       entry point: reads the token, builds JDA, registers slash commands
 ├── commands/
 │   ├── SlashCommandListener.java  /ping and /hello
-│   └── GangCommandListener.java   !gang-* commands, reaction handling, message rendering
+│   ├── GangCommandListener.java   !gang-* commands and reactions → game actions; sends and edits messages
+│   ├── GameMessages.java          text of the overview, locked-in, showdown and hand messages
+│   └── Reactions.java             the ✅ and 1️⃣–9️⃣ emoji: creating and recognising them
 └── game/                          game logic with no Discord dependencies
     ├── GameManager.java           one GameSession per channel (ConcurrentHashMap)
-    ├── GameSession.java           players, hands, board, rounds, number claims, ready state
+    ├── GameSession.java           players, hands, board, number claims, ready state, round advancement
+    ├── Round.java                 Pre-flop → Flop → Turn → River, with the cards each one reveals
+    ├── RoundView.java             immutable snapshot of the current round, used to render messages
+    ├── RoundRecord.java           a finished round: its board and who held which number
     ├── Deck.java                  52 cards shuffled with SecureRandom; deal and burn
     ├── Card.java, Rank.java, Suit.java
     ├── HandEvaluator.java         best 5-card hand out of 7
     ├── HandValue.java             comparable hand strength plus a readable description
     ├── HandCategory.java          high card … royal flush
-    ├── Showdown.java              final ranking and win/loss check
+    ├── Showdown.java              final hands, win/loss check, weakest-to-strongest order
     └── Player.java
+
+src/test/java/dev/leon/discordbot/ unit tests (see "Tests" below)
 ```
 
 The `game` package knows nothing about Discord, so the rules can be read
-(and tested) on their own. `GangCommandListener` is the only class that turns
-game state into Discord messages and reactions into game actions.
+(and tested) on their own. In `commands`, `GangCommandListener` turns Discord
+events into game actions and sends the results; `GameMessages` decides what
+those messages say, and `Reactions` handles the emoji.
 
 ### Bot startup
 
@@ -164,17 +181,16 @@ globally.
 ### Game flow
 
 1. **Dealing.** `GameSession.dealHands()` shuffles a fresh deck, deals two
-   cards to each player in turn (like a real dealer), and starts round 1.
-   Hands are sent to players by DM.
-2. **Rounds.** `nextRound()` saves the previous round's number assignments to
-   the history, clears claims and ready flags, and reveals cards: on the
-   Flop it burns one card and deals three, on the Turn and River it burns one
-   and deals one.
-3. **Round message.** The bot posts an overview showing the board, who holds
-   which number, who is ready, the most recent action (e.g. "Alice took 2
-   from Bob") and earlier rounds. It then adds the reactions 1️⃣ … N️⃣ and ✅.
-   The message ID is stored in the session, so reactions on any other message
-   are ignored.
+   cards to each player in turn (like a real dealer), and starts the
+   Pre-flop. Hands are sent to players by DM.
+2. **Rounds.** Each `Round` knows how many cards it reveals. Starting a round
+   clears all claims and ready flags; on the Flop the session burns one card
+   and deals three, on the Turn and River it burns one and deals one.
+3. **Round message.** The bot renders an overview from a `RoundView`
+   snapshot: the board, who holds which number, who is ready, the most recent
+   action (e.g. "Alice took 2 from Bob") and earlier rounds. Once the message
+   is sent, `attachOverview` stores its ID in the session and the bot adds the
+   reactions 1️⃣ … N️⃣ and ✅. Reactions on any other message are ignored.
 4. **Claims.** `take(userId, number)` returns a sealed `TakeResult`:
    - `Taken(previousNumber, previousHolder)`: the claim succeeded. The
      listener removes the claimer's old number reaction and the previous
@@ -185,10 +201,14 @@ globally.
      removed.
 
    Removing a reaction calls `release`, which gives the number up.
-5. **Locking in.** After every change the bot edits the overview message.
-   When every player has a number and has reacted ✅, the round is locked:
-   the message is marked "locked in", its reactions are cleared, and the next
-   round is posted. After round 4 the showdown is posted.
+5. **Locking in.** After every change the listener calls
+   `advanceIfComplete()`. While someone is missing a number or a ✅, it
+   returns nothing and the bot just edits the overview. Once everyone has
+   both, the session saves the round as a `RoundRecord`, starts the next
+   round, and returns an `Advance`. The bot then edits the old message to
+   "locked in" (rendered from that record), clears its reactions, and posts
+   the next round's overview. After the River, `Advance.finished()` is true
+   and the bot posts the showdown instead.
 
 ### Hand evaluation
 
@@ -206,9 +226,10 @@ cards and keeps the strongest. For one combination, `evaluate`:
 
 `HandValue.compareTo` compares the category first and then the tiebreak ranks
 in order. That handles kickers and makes truly equal hands compare as 0.
-`Showdown.of` checks that the hands, sorted by claimed number, never decrease
-in strength. If they do, the table loses, and the bot prints the correct
-order using `<` and `=` for ties.
+`Showdown.win()` checks that the hands, sorted by claimed number, never
+decrease in strength. If they do, the table loses, and the bot prints
+`Showdown.weakestToStrongest()` as the correct order, using `<` and `=` for
+ties.
 
 ### Concurrency
 
@@ -218,11 +239,33 @@ asynchronously, so several reactions can arrive at the same time:
 - `GameManager` stores sessions in a `ConcurrentHashMap`, and
   `create` uses `putIfAbsent`, so two simultaneous `!gang-create` commands
   can't both succeed.
-- Every public `GameSession` method is `synchronized`, and multi-step updates
-  in the listener (checking whether a round is complete and advancing it,
-  rendering a message) hold the session lock for the whole step.
-- When a round message is sent, its ID is only stored if the session is still
-  in the same round. A slow callback can't overwrite the ID of a newer round.
+- Every `GameSession` method that touches game state is `synchronized`, and
+  each multi-step update happens inside one such method. For example,
+  `advanceIfComplete()` checks that the round is complete and advances it in
+  one step, so two simultaneous ✅ reactions can't both advance the round.
+  The listener never locks the session itself.
+- Messages are rendered from `view()`, an immutable snapshot taken in one
+  step, so a message never mixes state from before and after a change.
+- When a round message is sent, `attachOverview` only stores its ID if the
+  session is still in the same round. A slow callback can't overwrite the ID
+  of a newer round.
+
+### Tests
+
+The tests live in `src/test/java` and run without a Discord connection.
+
+| Test class | What it checks |
+|---|---|
+| `HandEvaluatorTest` | Every one of the 2,598,960 five-card hands gets the right category (matching the known poker counts), plus kickers, the wheel, ties and display order |
+| `GameSessionTest` | Joining, dealing, taking/stealing/releasing numbers, readiness, round advancement, the board growing 3/1/1, the showdown, and which overview message counts |
+| `ShowdownTest` | Win/loss, ties in either order, weakest-to-strongest ranking |
+| `GameMessagesTest` | The exact text of the overview, locked-in and showdown messages |
+| `ReactionsTest` | Parsing 1️⃣–9️⃣ and ✅, ignoring every other emoji |
+| `DeckTest`, `RoundTest`, `GameManagerTest` | 52 unique cards, round order and reveals, one game per channel |
+
+`TestCards` turns short notation like `"Ah 10c Ks"` into cards so hands are
+easy to write in tests. The Discord listeners aren't unit tested; they need a
+live (or mocked) JDA connection.
 
 ### Limitations
 
