@@ -1,0 +1,11 @@
+[Unit]
+Description=Pull the latest discord-bot image and restart the bot if it changed
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/discord-bot
+ExecStart=/usr/bin/docker compose pull --quiet
+ExecStart=/usr/bin/docker compose up -d
+ExecStartPost=/usr/bin/docker image prune -f

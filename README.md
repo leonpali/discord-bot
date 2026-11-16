@@ -125,6 +125,73 @@ commands are registered on startup.
 
 `./mvnw package` also runs the tests and stops if any fail.
 
+## Deployment (Raspberry Pi)
+
+GitHub builds and publishes the bot; the Pi only downloads it. Nothing from
+GitHub runs on the Pi and no port has to be opened on your router, which keeps
+this safe for a public repository.
+
+```text
+push to main ──► GitHub Actions ──► tests ──► ARM64 Docker image ──► ghcr.io/leonpali/discord-bot
+                                                                              │
+Raspberry Pi: a timer checks every 5 minutes, pulls a new image, restarts ◄───┘
+```
+
+### CI/CD workflow
+
+`.github/workflows/ci-cd.yml` runs on every push and pull request:
+
+- **`test`** runs `./mvnw verify` on a GitHub-hosted machine.
+- **`image`** (pushes to `main` only, after the tests pass) builds the
+  `Dockerfile` natively on GitHub's free ARM64 runner and pushes it to the
+  GitHub Container Registry as `latest` and `sha-<commit>`. Pull requests,
+  including ones from forks, never publish anything.
+
+The workflow only uses the built-in `GITHUB_TOKEN`; no secrets need to be set
+up, and the Discord token never leaves the Pi.
+
+### One-time setup
+
+1. **Make the image public.** After the first successful run, open the
+   package on your GitHub profile (**Packages → discord-bot → Package
+   settings**) and set its visibility to **Public** if it isn't already. The
+   Pi can then pull it without logging in.
+2. **Prepare the Pi.** Use a Pi 3, 4 or 5 with **64-bit** Raspberry Pi OS and
+   install Docker:
+   ```sh
+   curl -fsSL https://get.docker.com | sh
+   ```
+3. **Copy the `deploy/` folder** to `/opt/discord-bot` on the Pi and add the
+   token:
+   ```sh
+   sudo mkdir -p /opt/discord-bot
+   sudo cp deploy/* /opt/discord-bot/
+   cd /opt/discord-bot
+   sudo cp .env.example .env
+   sudo nano .env            # set DISCORD_TOKEN
+   sudo chmod 600 .env
+   ```
+4. **Start the bot and the update timer:**
+   ```sh
+   sudo docker compose up -d
+   sudo cp discord-bot-update.service discord-bot-update.timer /etc/systemd/system/
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now discord-bot-update.timer
+   ```
+
+The container restarts automatically after crashes and reboots. Useful
+commands on the Pi:
+
+```sh
+sudo docker compose logs -f                      # follow the bot's log
+sudo systemctl start discord-bot-update          # check for an update right now
+systemctl list-timers discord-bot-update.timer   # when the next check runs
+```
+
+A new version restarts the bot, which ends any game in progress, since games
+live in memory. To roll back, set the image in `docker-compose.yml` to an
+older `sha-…` tag and run `sudo docker compose up -d`.
+
 ## Technical overview
 
 ### Stack
@@ -162,6 +229,10 @@ src/main/java/dev/leon/discordbot/
     └── Player.java
 
 src/test/java/dev/leon/discordbot/ unit tests (see "Tests" below)
+
+Dockerfile                         builds the runnable image (see "Deployment")
+.github/workflows/ci-cd.yml        tests every push and PR; publishes the image from main
+deploy/                            docker-compose.yml, .env.example and the update timer for the Pi
 ```
 
 The `game` package knows nothing about Discord, so the rules can be read
